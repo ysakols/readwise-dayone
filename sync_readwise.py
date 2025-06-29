@@ -24,7 +24,8 @@ SMTP_FROM      = os.getenv("SMTP_FROM", SMTP_USER)
 # ── 1. Fetch today's finished articles ──────────────────────────────────────────
 def get_today_articles():
     """Return only today's fully-read articles (progress ≥ 0.95)."""
-    today = datetime.now(TIMEZONE).date().isoformat()
+    today = datetime.utcnow().date().isoformat()
+    print(f"DEBUG: Using today={today} for updatedAfter param")
     
     r = requests.get(
         "https://readwise.io/api/v3/list",
