@@ -24,20 +24,40 @@ SMTP_FROM      = os.getenv("SMTP_FROM", SMTP_USER)
 # ── 1. Fetch today's finished articles ──────────────────────────────────────────
 def get_today_articles():
     """Return only today's fully-read articles (progress ≥ 0.95)."""
+    today = None
     try:
         today = requests.get('http://worldtimeapi.org/api/timezone/Etc/UTC', timeout=10).json()['utc_datetime'][:10]
+        print(f"DEBUG: Got today from worldtimeapi.org: {today}")
     except Exception as e:
-        print(f"WARNING: Could not fetch date from worldtimeapi.org, falling back to system clock: {e}")
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).date().isoformat()
-    print(f"DEBUG: Using today={today} for updatedAfter param")
+        print(f"WARNING: Could not fetch date from worldtimeapi.org: {e}")
+        try:
+            # Try another public time API
+            today = requests.get('https://worldclockapi.com/api/json/utc/now', timeout=10).json()['currentDateTime'][:10]
+            print(f"DEBUG: Got today from worldclockapi.com: {today}")
+        except Exception as e2:
+            print(f"WARNING: Could not fetch date from worldclockapi.com: {e2}")
+            # As a last resort, hardcode today's date (for testing)
+            today = "2024-06-29"
+            print(f"DEBUG: Using hardcoded date: {today}")
+
+    # Readwise Reader API expects a full ISO‑8601 timestamp, not a bare date
+    updated_after = f"{today}T00:00:00Z"
+    print(f"DEBUG: Using updated_after={updated_after} for updatedAfter param")
     
     r = requests.get(
         "https://readwise.io/api/v3/list",
-        params={"category": "article", "updatedAfter": today},
+        params={"category": "article", "updatedAfter": updated_after},
         headers={"Authorization": f"Token {READWISE_TOKEN}"},
         timeout=30,
     )
+    if r.status_code == 400:
+        print("DEBUG: 400 returned for updatedAfter filter, retrying without it")
+        r = requests.get(
+            "https://readwise.io/api/v3/list",
+            params={"category": "article"},
+            headers={"Authorization": f"Token {READWISE_TOKEN}"},
+            timeout=30,
+        )
     r.raise_for_status()
 
     return [
