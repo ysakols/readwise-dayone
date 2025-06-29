@@ -2,7 +2,7 @@ name: Readwise → Day One
 
 on:
   schedule:
-    - cron:  '15 02 * * *'     # 02:15 UTC = 19:15 PT daily
+    - cron:  '0 7 * * *'     # 00:00 PDT (07:00 UTC)
   workflow_dispatch:
 
 jobs:
