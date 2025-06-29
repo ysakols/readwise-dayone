@@ -24,7 +24,12 @@ SMTP_FROM      = os.getenv("SMTP_FROM", SMTP_USER)
 # ── 1. Fetch today's finished articles ──────────────────────────────────────────
 def get_today_articles():
     """Return only today's fully-read articles (progress ≥ 0.95)."""
-    today = datetime.utcnow().date().isoformat()
+    try:
+        today = requests.get('http://worldtimeapi.org/api/timezone/Etc/UTC', timeout=10).json()['utc_datetime'][:10]
+    except Exception as e:
+        print(f"WARNING: Could not fetch date from worldtimeapi.org, falling back to system clock: {e}")
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date().isoformat()
     print(f"DEBUG: Using today={today} for updatedAfter param")
     
     r = requests.get(
