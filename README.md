@@ -1,6 +1,15 @@
 # ☕ Daily Readwise → Day One Automation
 
-Automatically sync your daily Readwise reading activity to Day One journal entries. This system runs daily and creates a formatted entry with all the articles you **finished reading** that day.
+Automatically sync your daily Readwise Reader activity to Day One journal entries. This system runs daily and creates **individual, detailed entries** for each article you finish reading, complete with author, summary, and rich metadata.
+
+## 🎉 Recently Updated!
+
+**New in v2.0:** Individual detailed entries with full metadata (author, summary, word count, etc.) instead of basic daily summaries. See [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) for details!
+
+**Available versions:**
+- ✅ **`sync_readwise_ultimate.py`** (RECOMMENDED) - Full-featured with deduplication, configurable modes
+- ✅ **`sync_readwise_v2.py`** - Simpler individual-entries version
+- 📦 **`sync_readwise.py`** - Original daily summary (legacy)
 
 ## 🚀 Quick Start
 
@@ -148,15 +157,33 @@ The test script will check:
 
 ## 📝 What the Script Does
 
-1. **Fetches today's finished articles** from Readwise API (reading progress ≥ 95%)
-2. **Formats them nicely** with Markdown links
-3. **Creates a Day One entry** with the format:
-   ```
-   ## 📚 Articles I finished reading on 2024-01-15
+**With the new ultimate version (`sync_readwise_ultimate.py`):**
 
-   - [Article Title](https://article-url.com)
-   - [Another Article](https://another-url.com)
+1. **Fetches recently finished articles** from Readwise Reader API (reading progress ≥ 95%)
+2. **Extracts full metadata**: title, author, summary, word count, reading time, etc.
+3. **Creates individual Day One entries** for each article with rich formatting:
+   ```markdown
+   # The Future of AI in Healthcare
+
+   **Author:** Dr. Sarah Chen
+   **Link:** [https://example.com/ai-healthcare](...)
+   **Read:** January 6, 2026 at 10:30 AM
+   **Length:** ~2,500 words (~12 min read)
+
+   ---
+
+   ## Summary
+
+   This comprehensive article explores how artificial intelligence is
+   revolutionizing healthcare delivery...
+
+   ---
+
+   *Synced from Readwise Reader*
    ```
+4. **Optionally creates a daily summary** (if enabled) with all articles in one entry
+5. **Prevents duplicates** using state tracking
+6. **Handles pagination** for large reading libraries
 
 ## 🎯 Smart Filtering
 

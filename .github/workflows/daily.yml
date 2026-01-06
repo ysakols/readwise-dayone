@@ -14,10 +14,21 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: pip install requests
-      - run: python sync_readwise.py
+
+      # Use the new ultimate version with enhanced features
+      - run: python sync_readwise_ultimate.py
         env:
+          # Required credentials
           READWISE_TOKEN: ${{ secrets.READWISE_TOKEN }}
           DAYONE_EMAIL:   ${{ secrets.DAYONE_EMAIL }}
           SMTP_USER:      ${{ secrets.SMTP_USER }}
           SMTP_PASS:      ${{ secrets.SMTP_PASS }}
-          SMTP_FROM:      ${{ secrets.SMTP_FROM }} 
+          SMTP_FROM:      ${{ secrets.SMTP_FROM }}
+
+          # Entry creation mode (customize as needed)
+          CREATE_INDIVIDUAL_ENTRIES: true   # Individual detailed entries
+          CREATE_DAILY_SUMMARY: false       # Set to true for daily rollup too
+
+          # Filtering settings (customize as needed)
+          READING_PROGRESS_THRESHOLD: 0.95  # 95% read threshold
+          DAYS_BACK: 1                      # Check last day 
