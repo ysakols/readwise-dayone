@@ -64,16 +64,19 @@ try:
     required_fields = {
         "id": "Unique article ID (for deduplication)",
         "title": "Article title",
-        "url": "Article URL",
+        "url": "Readwise Reader URL",
+        "source_url": "Original source URL",
         "author": "Article author",
         "summary": "Article summary/description",
+        "notes": "Your notes on the article",
         "reading_progress": "How far you've read (0.0 to 1.0)",
         "word_count": "Number of words",
+        "first_opened_at": "When you first opened it",
         "last_opened_at": "When you last opened it",
+        "published_date": "Original publication date",
         "updated_at": "When it was last updated",
         "created_at": "When it was added to Reader",
         "category": "Type (article, pdf, etc.)",
-        "notes": "Your notes on the article",
     }
 
     print("FIELD VERIFICATION:")

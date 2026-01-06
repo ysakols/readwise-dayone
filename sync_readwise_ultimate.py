@@ -194,17 +194,26 @@ def get_article_summary(article: Dict[str, Any]) -> Optional[str]:
 
 def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
     """
-    Format a single article into a rich Day One entry.
+    Format a single article into a rich Day One entry with comprehensive metadata.
     """
+    # Extract all metadata fields
     title = article.get("title", "Untitled Article")
     url = article.get("url", "")
+    source_url = article.get("source_url", "")
     author = article.get("author", "")
     summary = get_article_summary(article)
     reading_progress = article.get("reading_progress", 0)
     word_count = article.get("word_count", 0)
-    last_opened = article.get("last_opened_at", "")
 
-    # Format the date
+    # Date fields
+    last_opened = article.get("last_opened_at", "")
+    first_opened = article.get("first_opened_at", "")
+    published_date = article.get("published_date", "")
+
+    # Notes (separate from summary)
+    notes = article.get("notes", "")
+
+    # Format last opened date
     read_date = "recently"
     if last_opened:
         try:
@@ -212,6 +221,28 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
             read_date = dt.strftime("%B %d, %Y at %I:%M %p")
         except:
             pass
+
+    # Format first opened date
+    first_read = None
+    if first_opened:
+        try:
+            dt = datetime.fromisoformat(first_opened.replace("Z", "+00:00"))
+            first_read = dt.strftime("%B %d, %Y")
+        except:
+            pass
+
+    # Format published date
+    published = None
+    if published_date:
+        try:
+            # Handle various date formats
+            if "T" in published_date:
+                dt = datetime.fromisoformat(published_date.replace("Z", "+00:00"))
+            else:
+                dt = datetime.fromisoformat(published_date)
+            published = dt.strftime("%B %d, %Y")
+        except:
+            published = published_date  # Use as-is if parsing fails
 
     # Build entry subject and body
     subject = f"📖 {title}"
@@ -224,10 +255,19 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
     if author:
         body_parts.append(f"**Author:** {author}\n\n")
 
-    if url:
-        body_parts.append(f"**Link:** [{url}]({url})\n\n")
+    if published:
+        body_parts.append(f"**Published:** {published}\n\n")
 
-    body_parts.append(f"**Read:** {read_date}\n\n")
+    if url:
+        body_parts.append(f"**Reader Link:** [{url}]({url})\n\n")
+
+    if source_url and source_url != url:
+        body_parts.append(f"**Original Source:** [{source_url}]({source_url})\n\n")
+
+    body_parts.append(f"**Last Read:** {read_date}\n\n")
+
+    if first_read and first_read != read_date:
+        body_parts.append(f"**First Opened:** {first_read}\n\n")
 
     if word_count:
         read_time = max(1, word_count // 200)  # Assume 200 words/min
@@ -239,6 +279,10 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
     # Summary section
     if summary:
         body_parts.append(f"---\n\n## Summary\n\n{summary}\n\n")
+
+    # Notes section (if different from summary)
+    if notes and notes.strip() and notes != summary:
+        body_parts.append(f"---\n\n## My Notes\n\n{notes.strip()}\n\n")
 
     # Footer
     body_parts.append(f"---\n\n*Synced from Readwise Reader*")

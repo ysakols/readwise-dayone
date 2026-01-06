@@ -143,45 +143,82 @@ def get_article_summary(article: Dict[str, Any]) -> Optional[str]:
 
 def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
     """
-    Format a single article into a rich Day One entry.
+    Format a single article into a rich Day One entry with comprehensive metadata.
     Returns dict with 'subject' and 'body'.
     """
+    # Extract all metadata fields
     title = article.get("title", "Untitled Article")
     url = article.get("url", "")
-    author = article.get("author", "Unknown Author")
+    source_url = article.get("source_url", "")
+    author = article.get("author", "")
     summary = get_article_summary(article)
 
     # Get reading metadata
     reading_progress = article.get("reading_progress", 0)
     word_count = article.get("word_count", 0)
+
+    # Date fields
     last_opened = article.get("last_opened_at", "")
+    first_opened = article.get("first_opened_at", "")
+    published_date = article.get("published_date", "")
     created_at = article.get("created_at", "")
 
-    # Format the date when you read it
+    # Notes (separate from summary)
+    notes = article.get("notes", "")
+
+    # Format last opened date
     read_date = "recently"
     if last_opened:
         try:
             dt = datetime.fromisoformat(last_opened.replace("Z", "+00:00"))
-            read_date = dt.strftime("%B %d, %Y")
+            read_date = dt.strftime("%B %d, %Y at %I:%M %p")
         except:
             pass
+
+    # Format first opened date
+    first_read = None
+    if first_opened:
+        try:
+            dt = datetime.fromisoformat(first_opened.replace("Z", "+00:00"))
+            first_read = dt.strftime("%B %d, %Y")
+        except:
+            pass
+
+    # Format published date
+    published = None
+    if published_date:
+        try:
+            if "T" in published_date:
+                dt = datetime.fromisoformat(published_date.replace("Z", "+00:00"))
+            else:
+                dt = datetime.fromisoformat(published_date)
+            published = dt.strftime("%B %d, %Y")
+        except:
+            published = published_date
 
     # Build the entry
     subject = f"📚 {title}"
 
     body_parts = [
-        f"# {title}\n",
-        f"**Author:** {author}\n" if author and author != "Unknown Author" else "",
-        f"**Source:** [{url}]({url})\n" if url else "",
-        f"**Read on:** {read_date}\n",
-        f"**Reading progress:** {reading_progress*100:.1f}%\n" if reading_progress else "",
-        f"**Length:** ~{word_count:,} words\n" if word_count else "",
-        "\n---\n\n",
+        f"# {title}\n\n",
+        f"**Author:** {author}\n\n" if author else "",
+        f"**Published:** {published}\n\n" if published else "",
+        f"**Reader Link:** [{url}]({url})\n\n" if url else "",
+        f"**Original Source:** [{source_url}]({source_url})\n\n" if source_url and source_url != url else "",
+        f"**Last Read:** {read_date}\n\n",
+        f"**First Opened:** {first_read}\n\n" if first_read and first_read != read_date else "",
+        f"**Reading progress:** {reading_progress*100:.1f}%\n\n" if reading_progress and reading_progress < 1.0 else "",
+        f"**Length:** ~{word_count:,} words (~{max(1, word_count // 200)} min read)\n\n" if word_count else "",
+        "---\n\n",
     ]
 
     # Add summary if available
     if summary:
         body_parts.append(f"## Summary\n\n{summary}\n\n")
+
+    # Notes section (if different from summary)
+    if notes and notes.strip() and notes != summary:
+        body_parts.append(f"---\n\n## My Notes\n\n{notes.strip()}\n\n")
 
     # Add tags/categories
     tags = []
@@ -193,7 +230,7 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
         tags.append("in-progress")
 
     if tags:
-        body_parts.append(f"\n---\n\n*Tags: {', '.join(tags)}*\n")
+        body_parts.append(f"---\n\n*Tags: {', '.join(tags)}*\n")
 
     # Add reading metadata as a footer
     body_parts.append(f"\n*Saved to Readwise Reader: {created_at[:10] if created_at else 'unknown'}*")
