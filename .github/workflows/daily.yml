@@ -1,0 +1,24 @@
+name: Sync Readwise → Day One
+
+on:
+  schedule:
+    - cron: '0 7 * * *'  # Daily at midnight PT (7:00 UTC)
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - run: python sync.py
+        env:
+          READWISE_TOKEN: ${{ secrets.READWISE_TOKEN }}
+          DAYONE_EMAIL: ${{ secrets.DAYONE_EMAIL }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
