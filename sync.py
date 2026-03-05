@@ -189,7 +189,7 @@ def get_recently_finished_articles(processed_ids: dict) -> List[Dict[str, Any]]:
             try:
                 if _parse_iso(last_moved) >= cutoff_date:
                     date_filtered.append(item)
-            except ValueError:
+            except (ValueError, TypeError, AttributeError):
                 pass  # Skip items with unparseable dates
 
     finished_articles = date_filtered
