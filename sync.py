@@ -10,6 +10,13 @@ import os, subprocess, requests, smtplib, ssl, email.utils, json, time
 from email.message import EmailMessage
 from typing import List, Dict, Any, Optional
 
+# Max retries for transient network failures
+MAX_RETRIES = 3
+RETRY_BACKOFF = 2  # seconds, doubles each retry
+
+# Max age of tracked article IDs before pruning (days)
+STATE_MAX_AGE_DAYS = 90
+
 # ── 0. Config ───────────────────────────────────────────────────────────────────
 READWISE_TOKEN = os.environ["READWISE_TOKEN"]
 TIMEZONE = timezone.utc
@@ -38,48 +45,83 @@ CATEGORIES = os.getenv("CATEGORIES", "article,rss,email").split(",")
 STATE_FILE = os.path.expanduser("~/.readwise_dayone_state.json")
 
 
-# ── 1. State Management ────────────────────────────────────────────────────────
-def load_processed_articles() -> set:
-    """Load the set of article IDs we've already processed"""
+# ── 1. Helpers ─────────────────────────────────────────────────────────────────
+def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
+    """Make an HTTP request with retry on transient failures."""
+    kwargs.setdefault("timeout", 30)
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            r = requests.request(method, url, **kwargs)
+            r.raise_for_status()
+            return r
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            wait = RETRY_BACKOFF * (2 ** attempt)
+            print(f"  ⚠️  Request failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {wait}s: {e}")
+            time.sleep(wait)
+        except requests.HTTPError:
+            raise  # Don't retry 4xx/5xx — they won't self-resolve
+    raise last_exc
+
+
+# ── 2. State Management ────────────────────────────────────────────────────────
+def load_processed_articles() -> dict:
+    """Load processed articles as {id: timestamp_iso} dict."""
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, 'r') as f:
                 data = json.load(f)
-                return set(data.get("processed_article_ids", []))
-    except Exception as e:
+                # Migrate from old list format to new dict format
+                if isinstance(data.get("processed_article_ids"), list):
+                    now = datetime.now(timezone.utc).isoformat()
+                    return {str(aid): now for aid in data["processed_article_ids"]}
+                return data.get("processed_articles", {})
+    except (json.JSONDecodeError, OSError) as e:
         print(f"⚠️  Could not load state file: {e}")
 
-    return set()
+    return {}
 
 
-def save_processed_articles(article_ids: set):
-    """Save the set of processed article IDs"""
+def save_processed_articles(articles: dict):
+    """Save processed articles dict and prune entries older than STATE_MAX_AGE_DAYS."""
     try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=STATE_MAX_AGE_DAYS)
+        pruned = {}
+        for aid, ts in articles.items():
+            try:
+                dt = datetime.fromisoformat(ts)
+                if dt >= cutoff:
+                    pruned[aid] = ts
+            except (ValueError, TypeError):
+                pruned[aid] = ts  # Keep entries with unparseable timestamps
+
+        if len(pruned) < len(articles):
+            print(f"🧹 Pruned {len(articles) - len(pruned)} old entries from state file")
+
         data = {
-            "processed_article_ids": list(article_ids),
+            "processed_articles": pruned,
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
         with open(STATE_FILE, 'w') as f:
             json.dump(data, f, indent=2)
-    except Exception as e:
+    except OSError as e:
         print(f"⚠️  Could not save state file: {e}")
 
 
-# ── 2. Fetch Articles from Readwise Reader ─────────────────────────────────────
+# ── 3. Fetch Articles from Readwise Reader ─────────────────────────────────────
 def get_recently_finished_articles() -> List[Dict[str, Any]]:
     """
     Fetch items that were recently archived across all categories.
 
     Returns items that:
     1. Are in the archive location
-    2. Were moved/archived in the last N days
+    2. Were updated in the last N days
     3. Haven't been processed before (deduplication)
     """
-    # Calculate the date range
-    days_ago = datetime.now(timezone.utc) - timedelta(days=DAYS_BACK)
-    cutoff_date = days_ago
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=DAYS_BACK)
 
-    print(f"📅 Fetching items archived since: {days_ago.date().isoformat()}")
+    print(f"📅 Fetching items archived since: {cutoff_date.date().isoformat()}")
     print(f"📂 Categories: {', '.join(CATEGORIES)}")
 
     all_items = []
@@ -93,6 +135,8 @@ def get_recently_finished_articles() -> List[Dict[str, Any]]:
         while True:
             params = {
                 "category": category.strip(),
+                "location": "archive",
+                "updatedAfter": cutoff_date.isoformat(),
                 "pageSize": 100,
             }
 
@@ -100,14 +144,12 @@ def get_recently_finished_articles() -> List[Dict[str, Any]]:
                 params["pageCursor"] = next_page_cursor
 
             try:
-                r = requests.get(
+                r = _request_with_retry(
+                    "GET",
                     "https://readwise.io/api/v3/list",
                     params=params,
                     headers={"Authorization": f"Token {READWISE_TOKEN}"},
-                    timeout=30,
                 )
-
-                r.raise_for_status()
                 data = r.json()
 
                 results = data.get("results", [])
@@ -124,32 +166,27 @@ def get_recently_finished_articles() -> List[Dict[str, Any]]:
                     print(f"  ⚠️  Reached 500 limit for {category}")
                     break
 
-            except Exception as e:
+            except requests.HTTPError as e:
                 print(f"  ❌ Error fetching {category}: {e}")
+                break
+            except (requests.ConnectionError, requests.Timeout) as e:
+                print(f"  ❌ Failed to fetch {category} after {MAX_RETRIES} retries: {e}")
                 break
 
         print(f"  📥 Fetched {category_count} {category} items")
 
     print(f"\n📊 Total items fetched: {len(all_items)}")
 
-    # Filter for archived items
-    archived_items = [
-        item for item in all_items
-        if item.get("location") == "archive"
-    ]
-
-    print(f"📂 Found {len(archived_items)} archived items")
-
-    # Client-side date filtering based on last_moved_at
+    # Client-side date filtering on last_moved_at for precision
     date_filtered = []
-    for item in archived_items:
+    for item in all_items:
         last_moved = item.get("last_moved_at", "")
         if last_moved:
             try:
                 dt = datetime.fromisoformat(last_moved.replace("Z", "+00:00"))
                 if dt >= cutoff_date:
                     date_filtered.append(item)
-            except:
+            except ValueError:
                 pass  # Skip items with unparseable dates
 
     finished_articles = date_filtered
@@ -159,7 +196,7 @@ def get_recently_finished_articles() -> List[Dict[str, Any]]:
     processed_ids = load_processed_articles()
     new_articles = [
         article for article in finished_articles
-        if article.get("id") not in processed_ids
+        if str(article.get("id")) not in processed_ids
     ]
 
     if len(new_articles) < len(finished_articles):
@@ -175,7 +212,7 @@ def get_recently_finished_articles() -> List[Dict[str, Any]]:
     return new_articles
 
 
-# ── 3. Format Article Data ──────────────────────────────────────────────────────
+# ── 4. Format Article Data ──────────────────────────────────────────────────────
 def get_article_summary(article: Dict[str, Any]) -> Optional[str]:
     """Extract summary from various possible fields"""
     summary = (
@@ -221,7 +258,7 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
         try:
             dt = datetime.fromisoformat(last_opened.replace("Z", "+00:00"))
             read_date = dt.strftime("%B %d, %Y at %I:%M %p")
-        except:
+        except (ValueError, TypeError):
             pass
 
     # Format first opened date
@@ -230,7 +267,7 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
         try:
             dt = datetime.fromisoformat(first_opened.replace("Z", "+00:00"))
             first_read = dt.strftime("%B %d, %Y")
-        except:
+        except (ValueError, TypeError):
             pass
 
     # Format published date
@@ -243,7 +280,7 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
             else:
                 dt = datetime.fromisoformat(published_date)
             published = dt.strftime("%B %d, %Y")
-        except:
+        except (ValueError, TypeError):
             published = published_date  # Use as-is if parsing fails
 
     # Build entry subject and body
@@ -355,7 +392,7 @@ def format_daily_summary(articles: List[Dict[str, Any]]) -> Dict[str, str]:
     }
 
 
-# ── 4. Write to Day One ─────────────────────────────────────────────────────────
+# ── 5. Write to Day One ─────────────────────────────────────────────────────────
 def write_via_cli(entry_data: Dict[str, str]):
     """Write entry via Day One CLI"""
     tags = ",".join(entry_data.get("tags", ["readwise"]))
@@ -368,7 +405,7 @@ def write_via_cli(entry_data: Dict[str, str]):
 
 
 def send_email(entry_data: Dict[str, str]):
-    """Send entry via email to Day One"""
+    """Send entry via email to Day One with retry on transient failures."""
     msg = EmailMessage()
     msg["Subject"] = entry_data["subject"]
     msg["From"] = SMTP_FROM
@@ -376,10 +413,22 @@ def send_email(entry_data: Dict[str, str]):
     msg["Date"] = email.utils.format_datetime(datetime.now(TIMEZONE))
     msg.set_content(entry_data["body"])
 
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL(SMTP_HOST, 465, context=ctx) as s:
-        s.login(SMTP_USER, SMTP_PASS)
-        s.send_message(msg)
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(SMTP_HOST, 465, context=ctx, timeout=30) as s:
+                s.login(SMTP_USER, SMTP_PASS)
+                s.send_message(msg)
+            return
+        except (OSError, smtplib.SMTPServerDisconnected) as e:
+            last_exc = e
+            wait = RETRY_BACKOFF * (2 ** attempt)
+            print(f"  ⚠️  Email send failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {wait}s: {e}")
+            time.sleep(wait)
+        except smtplib.SMTPException:
+            raise  # Auth errors, etc. — don't retry
+    raise last_exc
 
 
 def write_entry(entry_data: Dict[str, str]) -> bool:
@@ -395,7 +444,7 @@ def write_entry(entry_data: Dict[str, str]) -> bool:
         return False
 
 
-# ── 5. Main ─────────────────────────────────────────────────────────────────────
+# ── 6. Main ─────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 60)
     print("📚 Readwise Reader → Day One Sync")
@@ -410,9 +459,9 @@ def main():
 
         print(f"\n📝 Creating {len(articles)} entries...\n")
 
-        processed_ids = load_processed_articles()
-        new_processed_ids = []
+        processed = load_processed_articles()
         success_count = 0
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         for i, article in enumerate(articles, 1):
             title = article.get('title', 'Untitled')[:60]
@@ -422,7 +471,7 @@ def main():
                 entry_data = format_article_entry(article)
                 if write_entry(entry_data):
                     success_count += 1
-                    new_processed_ids.append(article.get("id"))
+                    processed[str(article.get("id"))] = now_iso
                     print(f"      ✅ Created")
                     if not USE_CLI and i < len(articles):
                         time.sleep(EMAIL_DELAY)
@@ -441,11 +490,10 @@ def main():
             except Exception as e:
                 print(f"❌ Failed to create daily summary: {e}\n")
 
-        # Update state file
-        if new_processed_ids:
-            processed_ids.update(new_processed_ids)
-            save_processed_articles(processed_ids)
-            print(f"💾 Saved state ({len(processed_ids)} total articles tracked)")
+        # Update state file (also prunes old entries)
+        if success_count > 0:
+            save_processed_articles(processed)
+            print(f"💾 Saved state ({len(processed)} total articles tracked)")
 
         print("\n" + "=" * 60)
         print("✅ Sync complete!")
