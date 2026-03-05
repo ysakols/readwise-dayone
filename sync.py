@@ -46,22 +46,22 @@ STATE_FILE = os.path.expanduser("~/.readwise_dayone_state.json")
 
 
 # ── 1. Helpers ─────────────────────────────────────────────────────────────────
-def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
-    """Make an HTTP request with retry on transient failures."""
-    kwargs.setdefault("timeout", 30)
+def _parse_iso(s: str) -> datetime:
+    """Parse an ISO 8601 date string, handling the Z suffix."""
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def _retry(fn, transient_exceptions, label="operation"):
+    """Call fn() with retry on transient failures. Returns fn()'s result."""
     last_exc = None
     for attempt in range(MAX_RETRIES):
         try:
-            r = requests.request(method, url, **kwargs)
-            r.raise_for_status()
-            return r
-        except (requests.ConnectionError, requests.Timeout) as e:
+            return fn()
+        except transient_exceptions as e:
             last_exc = e
             wait = RETRY_BACKOFF * (2 ** attempt)
-            print(f"  ⚠️  Request failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {wait}s: {e}")
+            print(f"  ⚠️  {label} failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {wait}s: {e}")
             time.sleep(wait)
-        except requests.HTTPError:
-            raise  # Don't retry 4xx/5xx — they won't self-resolve
     raise last_exc
 
 
@@ -69,18 +69,18 @@ def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
 def load_processed_articles() -> dict:
     """Load processed articles as {id: timestamp_iso} dict."""
     try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, 'r') as f:
-                data = json.load(f)
-                # Migrate from old list format to new dict format
-                if isinstance(data.get("processed_article_ids"), list):
-                    now = datetime.now(timezone.utc).isoformat()
-                    return {str(aid): now for aid in data["processed_article_ids"]}
-                return data.get("processed_articles", {})
+        with open(STATE_FILE, 'r') as f:
+            data = json.load(f)
+            # Migrate from old list format to new dict format
+            if isinstance(data.get("processed_article_ids"), list):
+                now = datetime.now(timezone.utc).isoformat()
+                return {str(aid): now for aid in data["processed_article_ids"]}
+            return data.get("processed_articles", {})
+    except FileNotFoundError:
+        return {}
     except (json.JSONDecodeError, OSError) as e:
         print(f"⚠️  Could not load state file: {e}")
-
-    return {}
+        return {}
 
 
 def save_processed_articles(articles: dict):
@@ -110,7 +110,7 @@ def save_processed_articles(articles: dict):
 
 
 # ── 3. Fetch Articles from Readwise Reader ─────────────────────────────────────
-def get_recently_finished_articles() -> List[Dict[str, Any]]:
+def get_recently_finished_articles(processed_ids: dict) -> List[Dict[str, Any]]:
     """
     Fetch items that were recently archived across all categories.
 
@@ -125,6 +125,8 @@ def get_recently_finished_articles() -> List[Dict[str, Any]]:
     print(f"📂 Categories: {', '.join(CATEGORIES)}")
 
     all_items = []
+    session = requests.Session()
+    session.headers["Authorization"] = f"Token {READWISE_TOKEN}"
 
     # Fetch from each category
     for category in CATEGORIES:
@@ -144,12 +146,12 @@ def get_recently_finished_articles() -> List[Dict[str, Any]]:
                 params["pageCursor"] = next_page_cursor
 
             try:
-                r = _request_with_retry(
-                    "GET",
-                    "https://readwise.io/api/v3/list",
-                    params=params,
-                    headers={"Authorization": f"Token {READWISE_TOKEN}"},
-                )
+                def _fetch(p=params):
+                    r = session.get("https://readwise.io/api/v3/list", params=p, timeout=30)
+                    r.raise_for_status()
+                    return r
+
+                r = _retry(_fetch, (requests.ConnectionError, requests.Timeout), label="API request")
                 data = r.json()
 
                 results = data.get("results", [])
@@ -178,13 +180,13 @@ def get_recently_finished_articles() -> List[Dict[str, Any]]:
     print(f"\n📊 Total items fetched: {len(all_items)}")
 
     # Client-side date filtering on last_moved_at for precision
+    # (updatedAfter filters on updated_at, but we want items moved to archive recently)
     date_filtered = []
     for item in all_items:
         last_moved = item.get("last_moved_at", "")
         if last_moved:
             try:
-                dt = datetime.fromisoformat(last_moved.replace("Z", "+00:00"))
-                if dt >= cutoff_date:
+                if _parse_iso(last_moved) >= cutoff_date:
                     date_filtered.append(item)
             except ValueError:
                 pass  # Skip items with unparseable dates
@@ -192,8 +194,7 @@ def get_recently_finished_articles() -> List[Dict[str, Any]]:
     finished_articles = date_filtered
     print(f"✅ Found {len(finished_articles)} items archived in the last {DAYS_BACK} day(s)")
 
-    # Load processed articles to avoid duplicates
-    processed_ids = load_processed_articles()
+    # Filter out already-processed articles
     new_articles = [
         article for article in finished_articles
         if str(article.get("id")) not in processed_ids
@@ -256,8 +257,7 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
     read_date = "recently"
     if last_opened:
         try:
-            dt = datetime.fromisoformat(last_opened.replace("Z", "+00:00"))
-            read_date = dt.strftime("%B %d, %Y at %I:%M %p")
+            read_date = _parse_iso(last_opened).strftime("%B %d, %Y at %I:%M %p")
         except (ValueError, TypeError):
             pass
 
@@ -265,8 +265,7 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
     first_read = None
     if first_opened:
         try:
-            dt = datetime.fromisoformat(first_opened.replace("Z", "+00:00"))
-            first_read = dt.strftime("%B %d, %Y")
+            first_read = _parse_iso(first_opened).strftime("%B %d, %Y")
         except (ValueError, TypeError):
             pass
 
@@ -274,12 +273,7 @@ def format_article_entry(article: Dict[str, Any]) -> Dict[str, str]:
     published = None
     if published_date:
         try:
-            # Handle various date formats
-            if "T" in published_date:
-                dt = datetime.fromisoformat(published_date.replace("Z", "+00:00"))
-            else:
-                dt = datetime.fromisoformat(published_date)
-            published = dt.strftime("%B %d, %Y")
+            published = _parse_iso(published_date).strftime("%B %d, %Y")
         except (ValueError, TypeError):
             published = published_date  # Use as-is if parsing fails
 
@@ -413,22 +407,14 @@ def send_email(entry_data: Dict[str, str]):
     msg["Date"] = email.utils.format_datetime(datetime.now(TIMEZONE))
     msg.set_content(entry_data["body"])
 
-    last_exc = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            ctx = ssl.create_default_context()
-            with smtplib.SMTP_SSL(SMTP_HOST, 465, context=ctx, timeout=30) as s:
-                s.login(SMTP_USER, SMTP_PASS)
-                s.send_message(msg)
-            return
-        except (OSError, smtplib.SMTPServerDisconnected) as e:
-            last_exc = e
-            wait = RETRY_BACKOFF * (2 ** attempt)
-            print(f"  ⚠️  Email send failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {wait}s: {e}")
-            time.sleep(wait)
-        except smtplib.SMTPException:
-            raise  # Auth errors, etc. — don't retry
-    raise last_exc
+    ctx = ssl.create_default_context()
+
+    def _send():
+        with smtplib.SMTP_SSL(SMTP_HOST, 465, context=ctx, timeout=30) as s:
+            s.login(SMTP_USER, SMTP_PASS)
+            s.send_message(msg)
+
+    _retry(_send, (OSError, smtplib.SMTPServerDisconnected), label="Email send")
 
 
 def write_entry(entry_data: Dict[str, str]) -> bool:
@@ -451,7 +437,8 @@ def main():
     print("=" * 60)
 
     try:
-        articles = get_recently_finished_articles()
+        processed = load_processed_articles()
+        articles = get_recently_finished_articles(processed)
 
         if not articles:
             print(f"\n✨ No new archived items in the last {DAYS_BACK} day(s).")
@@ -459,7 +446,6 @@ def main():
 
         print(f"\n📝 Creating {len(articles)} entries...\n")
 
-        processed = load_processed_articles()
         success_count = 0
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -469,9 +455,13 @@ def main():
 
             try:
                 entry_data = format_article_entry(article)
+                article_id = article.get("id")
+                if article_id is None:
+                    print(f"      ⚠️  Skipping article with no ID")
+                    continue
                 if write_entry(entry_data):
                     success_count += 1
-                    processed[str(article.get("id"))] = now_iso
+                    processed[str(article_id)] = now_iso
                     print(f"      ✅ Created")
                     if not USE_CLI and i < len(articles):
                         time.sleep(EMAIL_DELAY)
