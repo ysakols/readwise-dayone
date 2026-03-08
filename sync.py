@@ -62,7 +62,8 @@ def _retry(fn, transient_exceptions, label="operation"):
             wait = RETRY_BACKOFF * (2 ** attempt)
             print(f"  ⚠️  {label} failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {wait}s: {e}")
             time.sleep(wait)
-    raise last_exc
+    if last_exc is not None:
+        raise last_exc
 
 
 # ── 2. State Management ────────────────────────────────────────────────────────
@@ -90,10 +91,10 @@ def save_processed_articles(articles: dict):
         pruned = {}
         for aid, ts in articles.items():
             try:
-                dt = datetime.fromisoformat(ts)
+                dt = _parse_iso(ts)
                 if dt >= cutoff:
                     pruned[aid] = ts
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 pruned[aid] = ts  # Keep entries with unparseable timestamps
 
         if len(pruned) < len(articles):
@@ -188,7 +189,7 @@ def get_recently_finished_articles(processed_ids: dict) -> List[Dict[str, Any]]:
             try:
                 if _parse_iso(last_moved) >= cutoff_date:
                     date_filtered.append(item)
-            except ValueError:
+            except (ValueError, TypeError, AttributeError):
                 pass  # Skip items with unparseable dates
 
     finished_articles = date_filtered
