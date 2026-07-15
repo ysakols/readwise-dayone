@@ -1,5 +1,8 @@
 name: Sync Readwise → Day One
 
+# Note: GitHub auto-disables scheduled workflows after 60 days of repo
+# inactivity. Touching this file re-enables the schedule.
+
 on:
   schedule:
     - cron: '0 7 * * *'  # Daily at midnight PT (7:00 UTC)
