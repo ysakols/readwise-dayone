@@ -1,12 +1,17 @@
 name: Sync Readwise → Day One
 
 # Note: GitHub auto-disables scheduled workflows after 60 days of repo
-# inactivity. Touching this file re-enables the schedule.
+# inactivity. The keepalive step below re-enables this workflow via the API
+# on every run, which resets that 60-day inactivity timer.
 
 on:
   schedule:
     - cron: '0 7 * * *'  # Daily at midnight PT (7:00 UTC)
   workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write  # required by the keepalive step to re-enable this workflow
 
 jobs:
   sync:
@@ -25,3 +30,8 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
+      - name: Keepalive (reset 60-day auto-disable timer)
+        if: always()
+        run: gh api --method PUT "repos/${{ github.repository }}/actions/workflows/daily.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
