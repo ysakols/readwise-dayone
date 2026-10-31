@@ -1,0 +1,69 @@
+# Server-side secret + PII scan (gitleaks), copied from ysakols/claude-workflow.
+#
+# The local commit hook can be skipped; this check runs on GitHub, so it can't.
+# It scans the working tree AND the full commit history on every run, so a
+# secret added in one commit and deleted in a later one is still caught.
+#
+# gitleaks is pinned (v8.30.1, never @latest) and installed through the Go
+# module proxy, which verifies its checksum against sum.golang.org. Actions are
+# pinned by commit SHA. Findings are printed with --redact: the log shows file,
+# line, commit and rule, never the secret value.
+#
+# A finding in existing history is a real decision, not noise to allowlist:
+# rotate a real secret; for a confirmed false positive, add that one finding's
+# fingerprint to .gitleaksignore.
+
+name: gitleaks
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0   # full history for the history scan
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.24"   # resolves to >=1.24.11, required by gitleaks v8.30.1
+          cache: false
+      - name: Install gitleaks (pinned, Go module proxy, checksum-verified)
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Scan working tree for secrets and PII
+        run: |
+          gitleaks detect --no-git --source . \
+            --config .github/gitleaks.toml \
+            --report-format json --report-path "$RUNNER_TEMP/gl-tree.json" \
+            --redact --exit-code 1 -v
+      - name: Scan full commit history for secrets and PII
+        if: always()
+        run: |
+          gitleaks git . \
+            --config .github/gitleaks.toml \
+            --report-format json --report-path "$RUNNER_TEMP/gl-history.json" \
+            --redact --exit-code 1 -v
+      # One annotation listing every finding by rule, file, line and commit, so
+      # findings show on the PR and through the API. Never the matched value.
+      - name: Summarize findings (no secret values)
+        if: always()
+        run: |
+          rows=$(for f in "$RUNNER_TEMP/gl-tree.json" "$RUNNER_TEMP/gl-history.json"; do
+            [ -s "$f" ] || continue
+            scan=$(basename "$f" .json | sed 's/^gl-//')
+            jq -r --arg s "$scan" '.[] | "\($s) \(.RuleID) \(.File):\(.StartLine) commit=\((.Commit // "")[0:7]) fp=\(.Fingerprint)"' "$f"
+          done)
+          n=$(printf '%s' "$rows" | grep -c . || true)
+          [ "$n" -eq 0 ] && { echo "No findings."; exit 0; }
+          body=$(printf '%s\n' "$rows" | head -200 | sed ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=gitleaks: $n finding(s)::${body}"
