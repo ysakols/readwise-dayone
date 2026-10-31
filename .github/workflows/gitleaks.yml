@@ -53,17 +53,21 @@ jobs:
             --config .github/gitleaks.toml \
             --report-format json --report-path "$RUNNER_TEMP/gl-history.json" \
             --redact --exit-code 1 -v
-      # One annotation listing every finding by rule, file, line and commit, so
-      # findings show on the PR and through the API. Never the matched value.
+      # Annotations listing every finding as "<scan> <fingerprint>" (fingerprint =
+      # [commit:]file:rule:line), so findings show on the PR and through the API.
+      # Never the matched value. GitHub caps one annotation at 4096 characters
+      # and a step at 10 error annotations, so rows are split into chunks.
       - name: Summarize findings (no secret values)
         if: always()
         run: |
           rows=$(for f in "$RUNNER_TEMP/gl-tree.json" "$RUNNER_TEMP/gl-history.json"; do
             [ -s "$f" ] || continue
             scan=$(basename "$f" .json | sed 's/^gl-//')
-            jq -r --arg s "$scan" '.[] | "\($s) \(.RuleID) \(.File):\(.StartLine) commit=\((.Commit // "")[0:7]) fp=\(.Fingerprint)"' "$f"
+            jq -r --arg s "$scan" '.[] | "\($s) \(.Fingerprint)"' "$f"
           done)
           n=$(printf '%s' "$rows" | grep -c . || true)
           [ "$n" -eq 0 ] && { echo "No findings."; exit 0; }
-          body=$(printf '%s\n' "$rows" | head -200 | sed ':a;N;$!ba;s/\n/%0A/g')
-          echo "::error title=gitleaks: $n finding(s)::${body}"
+          printf '%s\n' "$rows" | awk -v n="$n" '
+            function flush() { if (buf != "") { k++; if (k <= 9) printf "::error title=gitleaks: %d finding(s), part %d::%s\n", n, k, buf; buf = "" } }
+            { if (length(buf) + length($0) + 3 > 3900) flush(); buf = (buf == "" ? $0 : buf "%0A" $0) }
+            END { flush(); if (k > 9) printf "::error title=gitleaks: %d finding(s)::Only the first 9 parts are shown; see the job log.\n", n }'
